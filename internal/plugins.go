@@ -228,7 +228,7 @@ func (pm *PluginManager) CreatePlugin(name string, tools []PluginTool) error {
 		Tools       []PluginTool `json:"tools"`
 	}{
 		Name:   name,
-		Version: "0.1.0",
+		Version: "1.0.0",
 		Tools:  tools,
 	}
 

@@ -145,27 +145,33 @@ Side-by-side diff viewer:
 
 ## Installation
 
+### Install Script (Recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrModelOS/Nexus/master/install.sh | sh
+```
+
 ### Pre-built Binaries
 
-Download from [GitHub Releases](https://github.com/nexus-cli/nexus/releases):
+Download from [GitHub Releases](https://github.com/MrModelOS/Nexus/releases):
 
 ```bash
 # Linux (amd64)
-curl -L https://github.com/nexus-cli/nexus/releases/download/v1.0.0/nexus-linux-amd64 -o nexus
-chmod +x nexus
-sudo mv nexus /usr/local/bin/
+curl -L https://github.com/MrModelOS/Nexus/releases/download/v1.0.0/nex-linux-amd64 -o nex
+chmod +x nex
+sudo mv nex /usr/local/bin/
 
 # macOS (arm64)
-curl -L https://github.com/nexus-cli/nexus/releases/download/v1.0.0/nexus-darwin-arm64 -o nexus
-chmod +x nexus
-sudo mv nexus /usr/local/bin/
+curl -L https://github.com/MrModelOS/Nexus/releases/download/v1.0.0/nex-darwin-arm64 -o nex
+chmod +x nex
+sudo mv nex /usr/local/bin/
 ```
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/nexus-cli/nexus.git
-cd nexus
+git clone https://github.com/MrModelOS/Nexus.git
+cd Nexus
 make install
 ```
 
