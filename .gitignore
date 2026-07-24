@@ -1,0 +1,55 @@
+# Binary
+nex
+nexus
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+*.prof
+
+# Dependency directories
+vendor/
+node_modules/
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+
+# Local config (NEVER commit these!)
+~/.config/nexus/
+*.enc
+*.key
+*.pem
+
+# Sessions
+*.session
+
+# Logs
+*.log
+
+# Temporary
+tmp/
+temp/
+*.tmp
