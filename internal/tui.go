@@ -691,6 +691,32 @@ func (m *Model) handleCommand(value string) []tea.Cmd {
 		return nil
 	}
 
+	if strings.HasPrefix(value, "/url ") || strings.HasPrefix(value, "/fetch ") {
+		var url string
+		if strings.HasPrefix(value, "/url ") {
+			url = strings.TrimPrefix(value, "/url ")
+		} else {
+			url = strings.TrimPrefix(value, "/fetch ")
+		}
+		url = strings.TrimSpace(url)
+		if url == "" {
+			m.output = append(m.output, "Usage: /url <url> or /fetch <url>")
+		} else {
+			m.output = append(m.output, fmt.Sprintf("\033[1;35mFetching:\033[0m %s", url))
+			cmds = append(cmds, func() tea.Msg {
+				tool := &FetchURLTool{}
+				result, err := tool.Execute(map[string]interface{}{"url": url})
+				if err != nil {
+					return StreamDoneMsg{Error: err}
+				}
+				return StreamDoneMsg{FullResponse: result}
+			})
+		}
+		m.textinput.SetValue("")
+		m.updateLayout()
+		return cmds
+	}
+
 	if value == "/vim" {
 		m.vimMode = !m.vimMode
 		state := "disabled"

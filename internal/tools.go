@@ -3,11 +3,14 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type Tool interface {
@@ -42,6 +45,8 @@ func NewToolRegistry() *ToolRegistry {
 	r.Register(&RunCommandTool{})
 	r.Register(&GrepTool{})
 	r.Register(&GlobTool{})
+	r.Register(&FetchURLTool{})
+	r.Register(&SearchWebTool{})
 
 	return r
 }
@@ -484,4 +489,132 @@ func (t *GlobTool) Execute(args map[string]interface{}) (string, error) {
 	}
 
 	return strings.Join(matches, "\n"), nil
+}
+
+type FetchURLTool struct{}
+
+func (t *FetchURLTool) Name() string        { return "fetch_url" }
+func (t *FetchURLTool) Description() string { return "Fetch URL content (docs, articles, code)" }
+func (t *FetchURLTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"url": map[string]interface{}{
+				"type":        "string",
+				"description": "URL to fetch",
+			},
+		},
+		"required": []string{"url"},
+	}
+}
+
+func (t *FetchURLTool) Execute(args map[string]interface{}) (string, error) {
+	url, _ := args["url"].(string)
+	if url == "" {
+		return "", fmt.Errorf("url is required")
+	}
+
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		url = "https://" + url
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Nexus/1.0)")
+	req.Header.Set("Accept", "text/html, text/plain, application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	content := string(body)
+
+	if strings.Contains(contentType, "text/html") {
+		content = stripHTML(content)
+		content = regexp.MustCompile(`\s+`).ReplaceAllString(content, " ")
+		content = strings.TrimSpace(content)
+	}
+
+	if len(content) > 50000 {
+		content = content[:50000] + "\n\n... (truncated)"
+	}
+
+	return fmt.Sprintf("URL: %s\nStatus: %d\nContent-Type: %s\n\n%s", url, resp.StatusCode, contentType, content), nil
+}
+
+func stripHTML(html string) string {
+	re := regexp.MustCompile(`(?s)<script[^>]*>.*?</script>`)
+	html = re.ReplaceAllString(html, "")
+	re = regexp.MustCompile(`(?s)<style[^>]*>.*?</style>`)
+	html = re.ReplaceAllString(html, "")
+	re = regexp.MustCompile(`<[^>]+>`)
+	html = re.ReplaceAllString(html, " ")
+	re = regexp.MustCompile(`&nbsp;`)
+	html = re.ReplaceAllString(html, " ")
+	re = regexp.MustCompile(`&amp;`)
+	html = re.ReplaceAllString(html, "&")
+	re = regexp.MustCompile(`&lt;`)
+	html = re.ReplaceAllString(html, "<")
+	re = regexp.MustCompile(`&gt;`)
+	html = re.ReplaceAllString(html, ">")
+	re = regexp.MustCompile(`&quot;`)
+	html = re.ReplaceAllString(html, "\"")
+	return html
+}
+
+type SearchWebTool struct{}
+
+func (t *SearchWebTool) Name() string        { return "search_web" }
+func (t *SearchWebTool) Description() string { return "Search the web for documentation" }
+func (t *SearchWebTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"query": map[string]interface{}{
+				"type":        "string",
+				"description": "Search query",
+			},
+		},
+		"required": []string{"query"},
+	}
+}
+
+func (t *SearchWebTool) Execute(args map[string]interface{}) (string, error) {
+	query, _ := args["query"].(string)
+	if query == "" {
+		return "", fmt.Errorf("query is required")
+	}
+
+	cmd := exec.Command("curl", "-s", "-A", "Mozilla/5.0",
+		fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", strings.ReplaceAll(query, " ", "+")))
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+
+	content := string(output)
+	content = stripHTML(content)
+	content = regexp.MustCompile(`\s+`).ReplaceAllString(content, " ")
+
+	if len(content) > 20000 {
+		content = content[:20000] + "\n\n... (truncated)"
+	}
+
+	return content, nil
 }
