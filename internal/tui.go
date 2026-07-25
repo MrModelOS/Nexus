@@ -175,7 +175,24 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
 		tea.EnterAltScreen,
+		m.checkForUpdate(),
 	)
+}
+
+func (m *Model) checkForUpdate() tea.Cmd {
+	return func() tea.Msg {
+		us := NewUpdateState()
+		if err := us.CheckForUpdate(); err != nil {
+			return nil
+		}
+		if us.Available {
+			return NotificationMsg{
+				Type:    "update",
+				Message: fmt.Sprintf("Update available: v%s → v%s (run /update)", us.CurrentVersion, us.LatestVersion),
+			}
+		}
+		return nil
+	}
 }
 
 func (m *Model) filterCommands() {
@@ -841,6 +858,21 @@ func (m *Model) handleCommand(value string) []tea.Cmd {
 		return nil
 	}
 
+	if value == "/version" {
+		m.output = append(m.output, fmt.Sprintf("\033[1;35mNexus:\033[0m v%s", GetVersion()))
+		m.textinput.SetValue("")
+		m.updateLayout()
+		return nil
+	}
+
+	if value == "/update" {
+		m.output = append(m.output, "\033[1;35mChecking for updates...\033[0m")
+		m.textinput.SetValue("")
+		m.updateLayout()
+		cmds = append(cmds, m.runUpdate())
+		return cmds
+	}
+
 	if strings.HasPrefix(value, "/url ") || strings.HasPrefix(value, "/fetch ") {
 		var url string
 		if strings.HasPrefix(value, "/url ") {
@@ -1211,6 +1243,32 @@ func (m *Model) runAutoFix() tea.Cmd {
 		}
 
 		return StreamDoneMsg{FullResponse: ""}
+	}
+}
+
+func (m *Model) runUpdate() tea.Cmd {
+	return func() tea.Msg {
+		us := NewUpdateState()
+
+		if err := us.CheckForUpdate(); err != nil {
+			return StreamDoneMsg{Error: fmt.Errorf("check update: %w", err)}
+		}
+
+		if !us.Available {
+			return StreamDoneMsg{FullResponse: fmt.Sprintf("✓ Already up to date (v%s)", us.CurrentVersion)}
+		}
+
+		m.output = append(m.output, fmt.Sprintf("\033[1;33m⚡ Update available: v%s → v%s\033[0m", us.CurrentVersion, us.LatestVersion))
+		m.output = append(m.output, "\033[1;35mDownloading...\033[0m")
+		m.updateLayout()
+
+		if err := us.DownloadAndInstall(); err != nil {
+			return StreamDoneMsg{Error: fmt.Errorf("update failed: %w", err)}
+		}
+
+		CleanupBackup()
+
+		return StreamDoneMsg{FullResponse: fmt.Sprintf("✓ Updated to v%s! Restart nexus to use the new version.", us.LatestVersion)}
 	}
 }
 
