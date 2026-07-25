@@ -9,10 +9,12 @@ import (
 )
 
 type Config struct {
-	DefaultModel string            `yaml:"default_model"`
-	Temperature  float64           `yaml:"temperature"`
-	SystemPrompt string            `yaml:"system_prompt"`
+	DefaultModel string              `yaml:"default_model"`
+	Temperature  float64             `yaml:"temperature"`
+	SystemPrompt string              `yaml:"system_prompt"`
 	Providers    map[string]Provider `yaml:"providers"`
+	Pool         *ModelPool          `yaml:"pool,omitempty"`
+	Context      *ContextConfig      `yaml:"context,omitempty"`
 }
 
 type Provider struct {
@@ -20,6 +22,38 @@ type Provider struct {
 	BaseURL string   `yaml:"base_url"`
 	APIKey  string   `yaml:"api_key"`
 	Models  []string `yaml:"models"`
+}
+
+type ModelPool struct {
+	Enabled     bool         `yaml:"enabled"`
+	MaxRetries  int          `yaml:"max_retries"`
+	RetryDelay  int          `yaml:"retry_delay_ms"`
+	Models      []PoolModel  `yaml:"models"`
+	Compactor   *Compactor   `yaml:"compactor,omitempty"`
+}
+
+type PoolModel struct {
+	Name       string `yaml:"name"`
+	Provider   string `yaml:"provider"`
+	BaseURL    string `yaml:"base_url,omitempty"`
+	APIKey     string `yaml:"api_key,omitempty"`
+	Priority   int    `yaml:"priority"`
+	MaxTokens  int    `yaml:"max_tokens,omitempty"`
+	Enabled    bool   `yaml:"enabled"`
+}
+
+type Compactor struct {
+	Enabled        bool   `yaml:"enabled"`
+	Provider       string `yaml:"provider"`
+	Model          string `yaml:"model"`
+	MaxTokens      int    `yaml:"max_tokens"`
+	SummaryPrompt  string `yaml:"summary_prompt,omitempty"`
+}
+
+type ContextConfig struct {
+	MaxTokens      int  `yaml:"max_tokens"`
+	AutoCompact    bool `yaml:"auto_compact"`
+	CompactPercent int  `yaml:"compact_percent"`
 }
 
 func ConfigDir() string {
@@ -95,6 +129,28 @@ func DefaultConfig() *Config {
 				Models:  []string{},
 			},
 		},
+		Pool: &ModelPool{
+			Enabled:    false,
+			MaxRetries: 3,
+			RetryDelay: 1000,
+			Models: []PoolModel{
+				{Name: "gpt-4o", Provider: "openai", Priority: 1, MaxTokens: 128000, Enabled: true},
+				{Name: "claude-sonnet-4-20250514", Provider: "anthropic", Priority: 2, MaxTokens: 200000, Enabled: true},
+				{Name: "gemma3:1b", Provider: "ollama", Priority: 3, MaxTokens: 8192, Enabled: true},
+			},
+			Compactor: &Compactor{
+				Enabled:       true,
+				Provider:      "ollama",
+				Model:         "gemma3:1b",
+				MaxTokens:     4096,
+				SummaryPrompt: "Summarize this conversation concisely, preserving key context and decisions:",
+			},
+		},
+		Context: &ContextConfig{
+			MaxTokens:      100000,
+			AutoCompact:    true,
+			CompactPercent: 80,
+		},
 	}
 }
 
@@ -124,10 +180,40 @@ func (c *Config) ResolveModel(model string) (provider string, baseURL string, mo
 		}
 	}
 
-	// fallback to ollama
 	if p, ok := c.Providers["ollama"]; ok && len(p.Models) > 0 {
 		return "ollama", p.BaseURL, p.Models[0]
 	}
 
 	return "", "", ""
+}
+
+func (c *Config) GetPoolModels() []PoolModel {
+	if c.Pool == nil || !c.Pool.Enabled {
+		return nil
+	}
+	var enabled []PoolModel
+	for _, m := range c.Pool.Models {
+		if m.Enabled {
+			enabled = append(enabled, m)
+		}
+	}
+	return enabled
+}
+
+func (c *Config) GetCompactorConfig() *Compactor {
+	if c.Pool == nil || c.Pool.Compactor == nil {
+		return nil
+	}
+	return c.Pool.Compactor
+}
+
+func (c *Config) GetContextConfig() *ContextConfig {
+	if c.Context == nil {
+		return &ContextConfig{
+			MaxTokens:      100000,
+			AutoCompact:    true,
+			CompactPercent: 80,
+		}
+	}
+	return c.Context
 }

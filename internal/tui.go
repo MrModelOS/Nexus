@@ -92,6 +92,8 @@ type Model struct {
 	prompts         *PromptManager
 	watcher         *Watcher
 	diff            *DiffViewer
+	failover        *FailoverManager
+	compressor      *ContextCompressor
 }
 
 func NewTUI(provider, modelName string, cfg *config.Config) Model {
@@ -158,6 +160,8 @@ func NewTUI(provider, modelName string, cfg *config.Config) Model {
 		vault:       NewVault(),
 		costs:       NewCostTracker(),
 		prompts:     NewPromptManager(),
+		failover:    NewFailoverManager(cfg),
+		compressor:  NewContextCompressor(cfg),
 	}
 }
 
@@ -354,6 +358,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rendered := m.renderMarkdown(result)
 		m.output = append(m.output, fmt.Sprintf("\033[1;32mResult:\033[0m\n%s", rendered))
 
+		m.updateLayout()
+
+		if len(m.queue) > 0 {
+			next := m.queue[0]
+			m.queue = m.queue[1:]
+			cmds = append(cmds, m.sendMessage(next))
+		}
+
+	case NotificationMsg:
+		color := "\033[1;33m"
+		if msg.Type == "error" {
+			color = "\033[1;31m"
+		} else if msg.Type == "success" {
+			color = "\033[1;32m"
+		} else if msg.Type == "failover" {
+			color = "\033[1;35m"
+		}
+		m.output = append(m.output, fmt.Sprintf("%s⚡ %s\033[0m", color, msg.Message))
+		m.updateLayout()
+
+	case FailoverNotificationMsg:
+		event := msg.Event
+		var notifMsg string
+		switch event.Type {
+		case "switch":
+			notifMsg = fmt.Sprintf("Switched to %s (%s)", event.Model, event.Provider)
+		case "failover":
+			notifMsg = fmt.Sprintf("Failover: %s → %s (reason: %s)", event.Model, event.Provider, event.Error)
+		case "error":
+			notifMsg = fmt.Sprintf("Model error: %s - %s", event.Model, event.Error)
+		}
+		if notifMsg != "" {
+			m.output = append(m.output, fmt.Sprintf("\033[1;35m⚡ %s\033[0m", notifMsg))
+			m.updateLayout()
+		}
+
+	case CompressionNotificationMsg:
+		event := msg.Event
+		notifMsg := fmt.Sprintf("Context compressed: %d → %d tokens (%d%%)",
+			event.TokensUsed, event.TokensMax-event.TokensUsed+event.TokensUsed*event.Percent/100, event.Percent)
+		m.output = append(m.output, fmt.Sprintf("\033[1;33m📦 %s\033[0m", notifMsg))
+		m.updateLayout()
+
 		m.streamBuf = ""
 		m.updateLayout()
 
@@ -448,11 +495,12 @@ func (m *Model) handleCommand(value string) []tea.Cmd {
 	}
 
 	if value == "/compact" {
-		result := CompactHistory(m.history, 10)
-		if result.Summary != "" {
-			summaryMsg := ChatMessage{Role: "system", Content: result.Summary}
-			m.history = append([]ChatMessage{summaryMsg}, result.Messages...)
-			m.output = append(m.output, "\033[1;33mCompacted older messages.\033[0m")
+		result, err := m.compressor.CompressWithModel(m.history)
+		if err != nil {
+			m.output = append(m.output, fmt.Sprintf("\033[1;31mError:\033[0m %v", err))
+		} else if result.Compressed {
+			m.history = result.Messages
+			m.output = append(m.output, FormatCompactResult(result))
 		} else {
 			m.output = append(m.output, "History is already compact.")
 		}
@@ -686,6 +734,25 @@ func (m *Model) handleCommand(value string) []tea.Cmd {
 			lines = append(lines, fmt.Sprintf("  • %s: %s", t.Name, t.Description))
 		}
 		m.output = append(m.output, strings.Join(lines, "\n"))
+		m.textinput.SetValue("")
+		m.updateLayout()
+		return nil
+	}
+
+	if value == "/pool" {
+		m.output = append(m.output, m.failover.GetStatus())
+		m.textinput.SetValue("")
+		m.updateLayout()
+		return nil
+	}
+
+	if value == "/tokens" {
+		tokens, maxTokens, percent := m.compressor.GetTokenUsage(m.history)
+		status := fmt.Sprintf("\033[1;35mToken Usage:\033[0m\n\n")
+		status += fmt.Sprintf("Used: %d / %d tokens (%d%%)\n", tokens, maxTokens, percent)
+		status += fmt.Sprintf("Auto compact: %v\n", m.cfg.GetContextConfig().AutoCompact)
+		status += fmt.Sprintf("Compact at: %d%%\n", m.cfg.GetContextConfig().CompactPercent)
+		m.output = append(m.output, status)
 		m.textinput.SetValue("")
 		m.updateLayout()
 		return nil
@@ -945,8 +1012,37 @@ func (m *Model) sendMessage(value string) tea.Cmd {
 	m.streaming = true
 	m.streamBuf = ""
 	m.mode = ModeNormal
+
+	if m.compressor.ShouldCompact(m.history) {
+		m.output = append(m.output, "\033[1;33m📦 Compressing context...\033[0m")
+		m.updateLayout()
+		return m.compressAndSend()
+	}
+
 	m.updateLayout()
 	return m.streamChat()
+}
+
+func (m *Model) compressAndSend() tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.compressor.CompressWithModel(m.history)
+		if err != nil {
+			return NotificationMsg{Type: "error", Message: fmt.Sprintf("Compression failed: %v", err)}
+		}
+		if result.Compressed {
+			m.history = result.Messages
+			return CompressionNotificationMsg{
+				Event: CompressionEvent{
+					Type:       "compress",
+					TokensUsed: m.compressor.EstimateTokens(result.Messages),
+					TokensMax:  m.cfg.GetContextConfig().MaxTokens,
+					Percent:    m.cfg.GetContextConfig().CompactPercent,
+					Summary:    result.Summary,
+				},
+			}
+		}
+		return NotificationMsg{Type: "info", Message: "Context already compact"}
+	}
 }
 
 func (m *Model) runAgentLoop(loop *AgentLoop) tea.Cmd {
@@ -1744,7 +1840,12 @@ func (m Model) streamChat() tea.Cmd {
 		}
 
 		var err error
-		if m.multiClient != nil {
+		if m.failover != nil && m.cfg.Pool != nil && m.cfg.Pool.Enabled {
+			_, err = m.failover.StreamChatWithFailover(messages, m.modelName, m.cfg.Temperature, errStream)
+			if err == nil {
+				return StreamDoneMsg{FullResponse: fullResponse.String()}
+			}
+		} else if m.multiClient != nil {
 			err = m.multiClient.StreamChat(messages, m.modelName, m.cfg.Temperature, errStream)
 		} else if m.client != nil {
 			err = m.client.StreamChat(messages, m.modelName, m.cfg.Temperature, errStream)

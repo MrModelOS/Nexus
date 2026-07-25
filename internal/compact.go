@@ -3,31 +3,243 @@ package internal
 import (
 	"fmt"
 	"strings"
+	"sync"
+
+	"github.com/nexus-cli/nexus/client"
+	"github.com/nexus-cli/nexus/config"
 )
 
 type CompactResult struct {
 	Summary  string
 	Messages []ChatMessage
+	Compressed bool
 }
 
-func CompactHistory(messages []ChatMessage, maxMessages int) CompactResult {
-	if len(messages) <= maxMessages {
-		return CompactResult{
-			Summary:  "",
-			Messages: messages,
+type ContextCompressor struct {
+	mu              sync.RWMutex
+	config          *config.Config
+	fallbackClient  *client.MultiProviderClient
+	tokenCount      int
+	maxTokens       int
+	autoCompact     bool
+	compactPercent  int
+	onCompress      func(CompressionEvent)
+}
+
+type CompressionEvent struct {
+	Type        string `json:"type"`
+	TokensUsed  int    `json:"tokens_used"`
+	TokensMax   int    `json:"tokens_max"`
+	Percent     int    `json:"percent"`
+	Summary     string `json:"summary,omitempty"`
+}
+
+func NewContextCompressor(cfg *config.Config) *ContextCompressor {
+	cc := &ContextCompressor{
+		config:        cfg,
+		maxTokens:     cfg.GetContextConfig().MaxTokens,
+		autoCompact:   cfg.GetContextConfig().AutoCompact,
+		compactPercent: cfg.GetContextConfig().CompactPercent,
+	}
+
+	if compactor := cfg.GetCompactorConfig(); compactor != nil && compactor.Enabled {
+		if p, ok := cfg.Providers[compactor.Provider]; ok {
+			cc.fallbackClient = client.NewMultiProvider(
+				client.ProviderType(p.Type),
+				p.BaseURL,
+				p.APIKey,
+			)
 		}
 	}
 
-	cutoff := len(messages) - maxMessages
+	return cc
+}
+
+func (cc *ContextCompressor) OnCompress(handler func(CompressionEvent)) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.onCompress = handler
+}
+
+func (cc *ContextCompressor) emitEvent(event CompressionEvent) {
+	if cc.onCompress != nil {
+		go cc.onCompress(event)
+	}
+}
+
+func (cc *ContextCompressor) EstimateTokens(messages []ChatMessage) int {
+	total := 0
+	for _, m := range messages {
+		total += estimateTokens(m.Content)
+	}
+	return total
+}
+
+func estimateTokens(text string) int {
+	words := strings.Fields(text)
+	tokens := 0
+	for _, word := range words {
+		tokens++
+		if len(word) > 4 {
+			tokens += len(word) / 4
+		}
+	}
+	return tokens
+}
+
+func (cc *ContextCompressor) ShouldCompact(messages []ChatMessage) bool {
+	if !cc.autoCompact {
+		return false
+	}
+	tokens := cc.EstimateTokens(messages)
+	threshold := cc.maxTokens * cc.compactPercent / 100
+	return tokens > threshold
+}
+
+func (cc *ContextCompressor) CompressWithModel(messages []ChatMessage) (CompactResult, error) {
+	cc.mu.RLock()
+	clientCopy := cc.fallbackClient
+	configCopy := cc.config.GetCompactorConfig()
+	cc.mu.RUnlock()
+
+	if clientCopy == nil || configCopy == nil {
+		return cc.LocalCompress(messages)
+	}
+
+	tokensBefore := cc.EstimateTokens(messages)
+
+	summary, err := cc.summarizeWithLLM(messages, clientCopy, configCopy)
+	if err != nil {
+		return cc.LocalCompress(messages)
+	}
+
+	recentCount := len(messages) / 4
+	if recentCount < 5 {
+		recentCount = 5
+	}
+	if recentCount > len(messages) {
+		recentCount = len(messages)
+	}
+
+	recentMessages := messages[len(messages)-recentCount:]
+
+	compressed := make([]ChatMessage, 0, recentCount+1)
+	compressed = append(compressed, ChatMessage{
+		Role:    "system",
+		Content: fmt.Sprintf("[Context compressed - %d tokens summarized]\n\n%s", tokensBefore, summary),
+	})
+	compressed = append(compressed, recentMessages...)
+
+	cc.emitEvent(CompressionEvent{
+		Type:       "compress",
+		TokensUsed: tokensBefore,
+		TokensMax:  cc.maxTokens,
+		Percent:    tokensBefore * 100 / cc.maxTokens,
+		Summary:    summary,
+	})
+
+	return CompactResult{
+		Summary:    summary,
+		Messages:   compressed,
+		Compressed: true,
+	}, nil
+}
+
+func (cc *ContextCompressor) summarizeWithLLM(
+	messages []ChatMessage,
+	c *client.MultiProviderClient,
+	cfg *config.Compactor,
+) (string, error) {
+	var sb strings.Builder
+	sb.WriteString("Previous conversation:\n\n")
+
+	for _, m := range messages {
+		role := "User"
+		if m.Role == "assistant" {
+			role = "Assistant"
+		}
+		content := m.Content
+		if len(content) > 500 {
+			content = content[:500] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("%s: %s\n\n", role, content))
+	}
+
+	prompt := cfg.SummaryPrompt
+	if prompt == "" {
+		prompt = "Summarize this conversation concisely, preserving key context and decisions:"
+	}
+
+	chatMessages := []client.Message{
+		{Role: "user", Content: prompt + "\n\n" + sb.String()},
+	}
+
+	result, err := c.Chat(chatMessages, cfg.Model, 0.3)
+	if err != nil {
+		return "", err
+	}
+
+	return result, nil
+}
+
+func (cc *ContextCompressor) LocalCompress(messages []ChatMessage) (CompactResult, error) {
+	tokensBefore := cc.EstimateTokens(messages)
+
+	cutoff := len(messages) - len(messages)/4
+	if cutoff < 1 {
+		cutoff = 1
+	}
+
 	oldMessages := messages[:cutoff]
 	recentMessages := messages[cutoff:]
 
 	summary := summarizeMessages(oldMessages)
 
+	compressed := make([]ChatMessage, 0, len(recentMessages)+1)
+	compressed = append(compressed, ChatMessage{
+		Role:    "system",
+		Content: fmt.Sprintf("[Context compressed locally - %d tokens]\n\n%s", tokensBefore, summary),
+	})
+	compressed = append(compressed, recentMessages...)
+
+	cc.emitEvent(CompressionEvent{
+		Type:       "compress_local",
+		TokensUsed: tokensBefore,
+		TokensMax:  cc.maxTokens,
+		Percent:    tokensBefore * 100 / cc.maxTokens,
+		Summary:    summary,
+	})
+
 	return CompactResult{
-		Summary:  summary,
-		Messages: recentMessages,
+		Summary:    summary,
+		Messages:   compressed,
+		Compressed: true,
+	}, nil
+}
+
+func (cc *ContextCompressor) GetTokenUsage(messages []ChatMessage) (int, int, int) {
+	tokens := cc.EstimateTokens(messages)
+	percent := tokens * 100 / cc.maxTokens
+	return tokens, cc.maxTokens, percent
+}
+
+func (cc *ContextCompressor) GetStatus() string {
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+
+	status := "\033[1;35mContext Compressor:\033[0m\n\n"
+	status += fmt.Sprintf("Max tokens: %d\n", cc.maxTokens)
+	status += fmt.Sprintf("Auto compact: %v\n", cc.autoCompact)
+	status += fmt.Sprintf("Compact at: %d%%\n", cc.compactPercent)
+
+	if cc.fallbackClient != nil {
+		cfg := cc.config.GetCompactorConfig()
+		status += fmt.Sprintf("Compactor model: %s (%s)\n", cfg.Model, cfg.Provider)
+	} else {
+		status += "Compactor: local (no LLM)\n"
 	}
+
+	return status
 }
 
 func summarizeMessages(messages []ChatMessage) string {
@@ -80,25 +292,13 @@ func FormatCompactResult(result CompactResult) string {
 		return "History is already compact."
 	}
 
-	return fmt.Sprintf(
-		"\033[1;33mCompacted %d older messages into summary.\033[0m\nSummary saved to context.",
-		countOldMessages(result),
-	)
-}
+	method := "locally"
+	if result.Compressed {
+		method = "with LLM"
+	}
 
-func countOldMessages(result CompactResult) int {
-	if result.Summary == "" {
-		return 0
-	}
-	lines := strings.Split(result.Summary, "\n")
-	count := 0
-	for _, line := range lines {
-		if strings.HasPrefix(line, "User discussed:") || strings.HasPrefix(line, "Assistant responded about:") {
-			continue
-		}
-		if len(line) > 3 && line[0] >= '1' && line[0] <= '9' {
-			count++
-		}
-	}
-	return count
+	return fmt.Sprintf(
+		"\033[1;33mCompressed conversation %s.\033[0m",
+		method,
+	)
 }

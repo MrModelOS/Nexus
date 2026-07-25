@@ -18,3 +18,16 @@ type ToolResultMsg struct {
 	Call   *ToolCall
 	Result string
 }
+
+type NotificationMsg struct {
+	Type    string
+	Message string
+}
+
+type FailoverNotificationMsg struct {
+	Event FailoverEvent
+}
+
+type CompressionNotificationMsg struct {
+	Event CompressionEvent
+}
