@@ -96,6 +96,7 @@ type Model struct {
 	failover        *FailoverManager
 	compressor      *ContextCompressor
 	connectState    *ConnectState
+	subAgents       *SubAgentManager
 }
 
 func NewTUI(provider, modelName string, cfg *config.Config) Model {
@@ -140,6 +141,11 @@ func NewTUI(provider, modelName string, cfg *config.Config) Model {
 	pm := NewPluginManager()
 	pm.LoadAll()
 
+	sam := NewSubAgentManager(5)
+	if multiClient != nil {
+		sam.SetClient(multiClient, modelName, cfg.Temperature)
+	}
+
 	return Model{
 		textinput:   ti,
 		provider:    provider,
@@ -153,7 +159,6 @@ func NewTUI(provider, modelName string, cfg *config.Config) Model {
 		skills:      LoadSkills(),
 		projectCtx:  projectCtx,
 		gitInfo:     GetGitInfo(),
-		tools:       NewToolRegistry(),
 		permissions: NewPermissionManager(projectDir),
 		context:     NewContextManager(projectDir),
 		agentLoop:   NewAgentLoopManager(),
@@ -164,11 +169,13 @@ func NewTUI(provider, modelName string, cfg *config.Config) Model {
 		prompts:     NewPromptManager(),
 		failover:    NewFailoverManager(cfg),
 		compressor:  NewContextCompressor(cfg),
+		subAgents:   sam,
 	}
 }
 
 func (m *Model) SetClient(c *client.Client) {
 	m.client = c
+	m.tools = NewToolRegistryWithSubAgents(m.subAgents)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -824,6 +831,28 @@ func (m *Model) handleCommand(value string) []tea.Cmd {
 			return StreamDoneMsg{FullResponse: fmt.Sprintf("Indexed %d files", len(m.context.fileIndex))}
 		})
 		return cmds
+	}
+
+	if value == "/agents" || value == "/agents status" {
+		m.output = append(m.output, m.subAgents.GetStatus())
+		m.textinput.SetValue("")
+		m.updateLayout()
+		return nil
+	}
+
+	if value == "/agents collect" {
+		m.output = append(m.output, m.subAgents.CollectResults())
+		m.textinput.SetValue("")
+		m.updateLayout()
+		return nil
+	}
+
+	if value == "/agents cancel" {
+		m.subAgents.CancelAll()
+		m.output = append(m.output, "\033[1;33mAll sub-agents cancelled\033[0m")
+		m.textinput.SetValue("")
+		m.updateLayout()
+		return nil
 	}
 
 	if value == "/tools" {

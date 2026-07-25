@@ -51,6 +51,17 @@ func NewToolRegistry() *ToolRegistry {
 	return r
 }
 
+func NewToolRegistryWithSubAgents(sam *SubAgentManager) *ToolRegistry {
+	r := NewToolRegistry()
+
+	r.Register(&SubAgentTool{manager: sam})
+	r.Register(&SubAgentStatusTool{manager: sam})
+	r.Register(&SubAgentCollectTool{manager: sam})
+	r.Register(&SubAgentCancelTool{manager: sam})
+
+	return r
+}
+
 func (r *ToolRegistry) Register(tool Tool) {
 	r.tools[tool.Name()] = tool
 }
