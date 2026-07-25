@@ -38,6 +38,7 @@ const (
 	ModeSessionPicker
 	ModeSkillPicker
 	ModeApproval
+	ModeConnect
 )
 
 type Model struct {
@@ -94,6 +95,7 @@ type Model struct {
 	diff            *DiffViewer
 	failover        *FailoverManager
 	compressor      *ContextCompressor
+	connectState    *ConnectState
 }
 
 func NewTUI(provider, modelName string, cfg *config.Config) Model {
@@ -204,6 +206,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.mode == ModeApproval {
 		return m.updateApproval(msg)
+	}
+
+	if m.mode == ModeConnect {
+		return m.updateConnect(msg)
 	}
 
 	if m.modelPicker {
@@ -459,6 +465,75 @@ func (m *Model) updateApproval(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) updateConnect(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.connectState == nil {
+		m.mode = ModeNormal
+		return m, nil
+	}
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		key := msg.String()
+
+		switch key {
+		case "esc":
+			m.mode = ModeNormal
+			m.connectState = nil
+			m.updateLayout()
+			return m, nil
+
+		case "up":
+			m.connectState.HandleKey("up")
+			m.updateLayout()
+			return m, nil
+
+		case "down":
+			m.connectState.HandleKey("down")
+			m.updateLayout()
+			return m, nil
+
+		case "enter":
+			m.connectState.HandleKey("enter")
+
+			if m.connectState.Step == ConnectDone {
+				m.cfg = m.connectState.ApplyConfig(m.cfg)
+				config.Save(m.cfg)
+
+				p := PopularProviders[m.connectState.Provider]
+				m.provider = strings.ToLower(p.Name)
+				m.provider = strings.ReplaceAll(m.provider, " ", "")
+				m.provider = strings.ReplaceAll(m.provider, "(", "")
+				m.provider = strings.ReplaceAll(m.provider, ")", "")
+				m.provider = strings.ReplaceAll(m.provider, "local", "")
+
+				if len(p.Models) > 0 && m.connectState.ModelCursor < len(p.Models) {
+					m.modelName = p.Models[m.connectState.ModelCursor]
+				}
+
+				m.output = append(m.output, fmt.Sprintf("\033[1;32m✓ Connected to %s\033[0m", p.Name))
+				m.mode = ModeNormal
+				m.connectState = nil
+			}
+
+			m.updateLayout()
+			return m, nil
+
+		default:
+			if m.connectState.Step == ConnectEnterAPIKey {
+				if key == "backspace" {
+					m.connectState.HandleKey("backspace")
+				} else if len(key) == 1 {
+					m.connectState.HandleKey(key)
+				}
+				m.updateLayout()
+				return m, nil
+			}
+		}
+	}
+
+	return m, nil
+}
+
 func (m *Model) handleCommand(value string) []tea.Cmd {
 	var cmds []tea.Cmd
 
@@ -490,6 +565,14 @@ func (m *Model) handleCommand(value string) []tea.Cmd {
 		m.output = append(m.output, m.renderHelp())
 		m.textinput.SetValue("")
 		m.mode = ModeNormal
+		m.updateLayout()
+		return nil
+	}
+
+	if value == "/connect" {
+		m.connectState = NewConnectState()
+		m.mode = ModeConnect
+		m.textinput.SetValue("")
 		m.updateLayout()
 		return nil
 	}
@@ -1406,6 +1489,16 @@ func (m Model) View() string {
 	bottom.WriteString("\n")
 	bottom.WriteString(status)
 
+	if m.mode == ModeConnect && m.connectState != nil {
+		connectView := m.connectState.Render()
+		return lipgloss.JoinVertical(
+			lipgloss.Left,
+			header,
+			connectView,
+			bottom.String(),
+		)
+	}
+
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
@@ -1540,7 +1633,18 @@ func (m Model) renderWelcome() string {
 
 	content := fmt.Sprintf("%s\n\n%s\n%s\n%s", header, modelInfo, dirInfo, agentInfo)
 	boxed := boxStyle.Render(content)
-	tip := tipS.Render(" Tip: Shift+Tab to switch agent • Tab to cycle permissions")
+
+	var tips []string
+	tips = append(tips, "Shift+Tab: switch agent • Tab: cycle permissions")
+
+	if !HasValidModels(m.cfg) {
+		tips = []string{
+			"\033[1;92m⚡ Quick start: type /connect to set up a provider\033[0m",
+			"Supports: OpenAI, Anthropic, Groq, DeepSeek, Ollama, LM Studio",
+		}
+	}
+
+	tip := tipS.Render(strings.Join(tips, "\n "))
 
 	return boxed + "\n" + tip
 }

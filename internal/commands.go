@@ -16,6 +16,7 @@ func getCommands() []Command {
 		{"/clear", "Clear chat history"},
 		{"/commit", "Generate commit message"},
 		{"/compact", "Compress conversation history"},
+		{"/connect", "Connect to a provider (OpenAI, Anthropic, etc)"},
 		{"/context", "Show project structure"},
 		{"/costs", "Show token usage and costs"},
 		{"/ctx", "Show project structure (alias)"},
