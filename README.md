@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/nexus-logo.png" alt="Nexus" width="120">
-</p>
-
 <h1 align="center">Nexus</h1>
 
 <p align="center">
