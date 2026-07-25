@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,12 +57,16 @@ func (fm *FailoverManager) OnEvent(handler func(FailoverEvent)) {
 }
 
 func (fm *FailoverManager) emitEvent(event FailoverEvent) {
+	fm.mu.Lock()
 	fm.eventLog = append(fm.eventLog, event)
 	if len(fm.eventLog) > 1000 {
 		fm.eventLog = fm.eventLog[len(fm.eventLog)-500:]
 	}
-	if fm.onEvent != nil {
-		go fm.onEvent(event)
+	handler := fm.onEvent
+	fm.mu.Unlock()
+
+	if handler != nil {
+		go handler(event)
 	}
 }
 
@@ -262,20 +267,20 @@ func (fm *FailoverManager) findNextModel() int {
 
 func (fm *FailoverManager) isRateLimitError(err error) bool {
 	errStr := err.Error()
-	return contains(errStr, "429") ||
-		contains(errStr, "rate limit") ||
-		contains(errStr, "too many requests") ||
-		contains(errStr, "quota exceeded")
+	return strings.Contains(errStr, "429") ||
+		strings.Contains(errStr, "rate limit") ||
+		strings.Contains(errStr, "too many requests") ||
+		strings.Contains(errStr, "quota exceeded")
 }
 
 func (fm *FailoverManager) isServerError(err error) bool {
 	errStr := err.Error()
-	return contains(errStr, "500") ||
-		contains(errStr, "502") ||
-		contains(errStr, "503") ||
-		contains(errStr, "504") ||
-		contains(errStr, "server error") ||
-		contains(errStr, "timeout")
+	return strings.Contains(errStr, "500") ||
+		strings.Contains(errStr, "502") ||
+		strings.Contains(errStr, "503") ||
+		strings.Contains(errStr, "504") ||
+		strings.Contains(errStr, "server error") ||
+		strings.Contains(errStr, "timeout")
 }
 
 func (fm *FailoverManager) isRetryableError(err error) bool {
@@ -284,23 +289,10 @@ func (fm *FailoverManager) isRetryableError(err error) bool {
 
 func (fm *FailoverManager) isNetworkError(err error) bool {
 	errStr := err.Error()
-	return contains(errStr, "connection refused") ||
-		contains(errStr, "dial tcp") ||
-		contains(errStr, "no such host") ||
-		contains(errStr, "network")
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
-}
-
-func containsSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "dial tcp") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "network")
 }
 
 func (fm *FailoverManager) GetEventLog() []FailoverEvent {
@@ -345,19 +337,19 @@ func (fm *FailoverManager) GetStatus() string {
 
 func (fm *FailoverManager) HTTPStatusFromError(err error) int {
 	errStr := err.Error()
-	if contains(errStr, "429") {
+	if strings.Contains(errStr, "429") {
 		return http.StatusTooManyRequests
 	}
-	if contains(errStr, "500") {
+	if strings.Contains(errStr, "500") {
 		return http.StatusInternalServerError
 	}
-	if contains(errStr, "502") {
+	if strings.Contains(errStr, "502") {
 		return http.StatusBadGateway
 	}
-	if contains(errStr, "503") {
+	if strings.Contains(errStr, "503") {
 		return http.StatusServiceUnavailable
 	}
-	if contains(errStr, "504") {
+	if strings.Contains(errStr, "504") {
 		return http.StatusGatewayTimeout
 	}
 	return 0

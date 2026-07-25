@@ -245,16 +245,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.updateLayout()
 				return m, nil
-			case tea.KeyTab:
-				if len(m.filteredCmds) > 0 {
-					commands := getCommands()
-					selected := commands[m.filteredCmds[m.hintCursor]]
-					m.textinput.SetValue(selected.cmd + " ")
-					m.mode = ModeNormal
-					m.hintCursor = 0
-					m.updateLayout()
-					return m, nil
-				}
 			}
 		}
 
@@ -275,6 +265,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyShiftTab:
 			m.agent = m.agent.Toggle()
 			m.output = append(m.output, fmt.Sprintf("\033[1;33mAgent:\033[0m %s mode", m.agent.String()))
+			m.updateLayout()
+			return m, nil
+
+		case tea.KeyTab:
+			if m.showHints() && len(m.filteredCmds) > 0 {
+				commands := getCommands()
+				selected := commands[m.filteredCmds[m.hintCursor]]
+				m.textinput.SetValue(selected.cmd + " ")
+				m.mode = ModeNormal
+				m.hintCursor = 0
+				m.updateLayout()
+				return m, nil
+			}
+			m.permMode = (m.permMode + 1) % 4
+			m.output = append(m.output, fmt.Sprintf("\033[1;33mPermissions:\033[0m %s", permModeNames[m.permMode]))
 			m.updateLayout()
 			return m, nil
 
@@ -396,15 +401,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CompressionNotificationMsg:
 		event := msg.Event
-		notifMsg := fmt.Sprintf("Context compressed: %d → %d tokens (%d%%)",
-			event.TokensUsed, event.TokensMax-event.TokensUsed+event.TokensUsed*event.Percent/100, event.Percent)
+		notifMsg := fmt.Sprintf("Context compressed: %d tokens (%d%%)", event.TokensUsed, event.Percent)
 		m.output = append(m.output, fmt.Sprintf("\033[1;33m📦 %s\033[0m", notifMsg))
+		m.streaming = false
 		m.updateLayout()
-
-		m.streamBuf = ""
-		m.updateLayout()
-
-		cmds = append(cmds, m.streamChat())
 	}
 
 	var cmd tea.Cmd
@@ -1034,9 +1034,9 @@ func (m *Model) compressAndSend() tea.Cmd {
 			return CompressionNotificationMsg{
 				Event: CompressionEvent{
 					Type:       "compress",
-					TokensUsed: m.compressor.EstimateTokens(result.Messages),
+					TokensUsed: m.compressor.EstimateTokens(m.history),
 					TokensMax:  m.cfg.GetContextConfig().MaxTokens,
-					Percent:    m.cfg.GetContextConfig().CompactPercent,
+					Percent:    m.compressor.EstimateTokens(result.Messages) * 100 / m.cfg.GetContextConfig().MaxTokens,
 					Summary:    result.Summary,
 				},
 			}
@@ -1055,7 +1055,7 @@ func (m *Model) runAgentLoop(loop *AgentLoop) tea.Cmd {
 
 			var fullResponse strings.Builder
 
-			err := m.client.StreamChat(messages, m.modelName, m.cfg.Temperature, func(token string) error {
+			err := m.multiClient.StreamChat(messages, m.modelName, m.cfg.Temperature, func(token string) error {
 				fullResponse.WriteString(token)
 				return nil
 			})
@@ -1186,7 +1186,7 @@ func (m *Model) generateCommitMessage() tea.Cmd {
 
 		var fullResponse strings.Builder
 
-		err = m.client.StreamChat(messages, m.modelName, m.cfg.Temperature, func(token string) error {
+		err = m.multiClient.StreamChat(messages, m.modelName, m.cfg.Temperature, func(token string) error {
 			fullResponse.WriteString(token)
 			return nil
 		})
@@ -1201,7 +1201,7 @@ func (m *Model) generateCommitMessage() tea.Cmd {
 
 func (m *Model) fetchModels() tea.Cmd {
 	return func() tea.Msg {
-		models, err := m.client.ListModels()
+		models, err := m.multiClient.ListModels()
 		if err != nil {
 			return StreamDoneMsg{Error: fmt.Errorf("fetch models: %w", err)}
 		}
@@ -1419,10 +1419,13 @@ func (m Model) renderHeader() string {
 	agent := RenderAgentBadge(m.agent)
 	model := lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true).Render(fmt.Sprintf("%s/%s", m.provider, m.modelName))
 
+	permMode := lipgloss.NewStyle().Foreground(lipgloss.Color(permModeColors[m.permMode])).Render(permModeNames[m.permMode])
+
 	var parts []string
 	parts = append(parts, title)
 	parts = append(parts, agent)
 	parts = append(parts, model)
+	parts = append(parts, permMode)
 
 	joined := strings.Join(parts, " ")
 
@@ -1437,7 +1440,13 @@ func (m Model) renderHeader() string {
 		gitPart = " " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("("+m.gitInfo.Branch+")")
 	}
 
-	return fmt.Sprintf("%s %s%s", joined, separator, gitPart)
+	tokens := ""
+	if m.compressor != nil {
+		t, max, _ := m.compressor.GetTokenUsage(m.history)
+		tokens = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf("[%d/%d]", t, max))
+	}
+
+	return fmt.Sprintf("%s %s%s %s", joined, separator, gitPart, tokens)
 }
 
 func (m Model) renderInput() string {
@@ -1786,7 +1795,7 @@ func (m Model) reviewGit() tea.Cmd {
 
 		var fullResponse strings.Builder
 
-		err = m.client.StreamChat(messages, m.modelName, m.cfg.Temperature, func(token string) error {
+		err = m.multiClient.StreamChat(messages, m.modelName, m.cfg.Temperature, func(token string) error {
 			fullResponse.WriteString(token)
 			return nil
 		})

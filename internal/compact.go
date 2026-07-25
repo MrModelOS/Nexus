@@ -62,8 +62,12 @@ func (cc *ContextCompressor) OnCompress(handler func(CompressionEvent)) {
 }
 
 func (cc *ContextCompressor) emitEvent(event CompressionEvent) {
-	if cc.onCompress != nil {
-		go cc.onCompress(event)
+	cc.mu.Lock()
+	handler := cc.onCompress
+	cc.mu.Unlock()
+
+	if handler != nil {
+		go handler(event)
 	}
 }
 
